@@ -131,6 +131,21 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(result.outcome, "no_postview")
         self.assertEqual(result.postview_urls, [])
 
+    def test_capture_result_simulated_provenance(self) -> None:
+        camera, _ = camera_with([IDLE, support.ok([[URL]]), IDLE])
+        self.assertTrue(camera.is_simulated)
+        result = capture_once(camera, self.recorder)
+        self.assertTrue(result.simulated)
+        self.assertTrue(result.as_dict()["simulated"])
+
+    def test_capture_result_hardware_provenance(self) -> None:
+        client = support.ScriptedClient([IDLE, support.ok([[URL]]), IDLE])
+        hw_camera = SonyCamera("http://192.168.122.1:10000/sony/camera", client=client)
+        self.assertFalse(hw_camera.is_simulated)
+        result = capture_once(hw_camera, self.recorder)
+        self.assertFalse(result.simulated)
+        self.assertFalse(result.as_dict()["simulated"])
+
 
 if __name__ == "__main__":
     unittest.main()

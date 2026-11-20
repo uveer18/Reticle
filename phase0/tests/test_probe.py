@@ -173,6 +173,27 @@ class RunProbeTests(unittest.TestCase):
         self.assertIn("| Bulb exposed by API | no |", markdown)
         self.assertIn("`30\"`", markdown)
 
+    def test_markdown_render_simulated_warning(self) -> None:
+        report = run_probe(camera_with(standard_responses()), self.recorder)
+        report["simulated"] = True
+        markdown = render_markdown(report)
+        self.assertIn("[SIMULATED]", markdown)
+        self.assertIn("SIMULATED CAMERA EVIDENCE", markdown)
+        self.assertIn("Provenance: `simulated`", markdown)
+
+    def test_probe_simulated_vs_hardware_provenance(self) -> None:
+        local_cam = camera_with(standard_responses())
+        self.assertTrue(local_cam.is_simulated)
+        rep_sim = run_probe(local_cam, self.recorder)
+        self.assertTrue(rep_sim["simulated"])
+        self.assertEqual(rep_sim["provenance"], "simulated")
+
+        hw_cam = SonyCamera("http://192.168.122.1:10000/sony/camera", client=support.CannedClient(standard_responses()))
+        self.assertFalse(hw_cam.is_simulated)
+        rep_hw = run_probe(hw_cam, self.recorder)
+        self.assertFalse(rep_hw["simulated"])
+        self.assertEqual(rep_hw["provenance"], "hardware")
+
 
 if __name__ == "__main__":
     unittest.main()

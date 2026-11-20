@@ -69,14 +69,15 @@ class EventStream:
             error_code=result.error_code,
         )
 
-    def poll_once(self) -> EventTick:
+    def poll_once(self, *, timeout: float | None = None) -> EventTick:
         """One long-poll attempt, including 40402 recovery."""
-        result = self.camera.get_event(polling=True, timeout=self.timeout)
+        effective_timeout = timeout if timeout is not None else self.timeout
+        result = self.camera.get_event(polling=True, timeout=effective_timeout)
         if result.error_code == ERR_ALREADY_POLLING:
             # A previous read timed out client-side but is still parked server-side.
             # Let it drain, then retry exactly once.
             time.sleep(1.0)
-            result = self.camera.get_event(polling=True, timeout=self.timeout)
+            result = self.camera.get_event(polling=True, timeout=effective_timeout)
         return EventTick(
             events=flatten(result.result),
             latency_ms=result.latency_ms,
@@ -98,8 +99,8 @@ class EventStream:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            self.timeout = min(self.timeout, max(5.0, remaining))
-            tick = self.poll_once()
+            poll_timeout = min(self.timeout, max(1.0, remaining))
+            tick = self.poll_once(timeout=poll_timeout)
             if tick.changed:
                 emitted += 1
                 yield tick

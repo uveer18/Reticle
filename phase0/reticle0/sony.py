@@ -9,6 +9,7 @@ Method semantics are taken from the Camera Remote API API Reference v2.40.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -71,24 +72,38 @@ def shutter_seconds(value: object) -> float | None:
 
     The documented wire form quotes whole seconds (``"30\\""`` means thirty
     seconds) and uses a slash for fractions (``"1/8000"``). Bulb and any
-    non-numeric value return ``None``. This is Sony value-encoding knowledge,
-    so it lives in the adapter rather than in a caller.
+    non-numeric or non-positive value return ``None``. This is Sony value-encoding
+    knowledge, so it lives in the adapter rather than in a caller.
     """
-    text = str(value).strip().replace('"', "").replace("\u201d", "")
+    if value is None:
+        return None
+    text = (
+        str(value)
+        .strip()
+        .replace('"', "")
+        .replace("\u201d", "")
+        .replace("\u201c", "")
+        .replace("\u2033", "")
+    )
     if not text:
         return None
     if text.upper() in {"BULB", "B"}:
         return None
     if "/" in text:
-        numerator, _, denominator = text.partition("/")
+        numerator, sep, denominator = text.partition("/")
+        if not sep or not numerator or not denominator:
+            return None
         try:
-            if float(denominator) == 0:
+            num_f = float(numerator)
+            den_f = float(denominator)
+            if den_f <= 0 or num_f <= 0:
                 return None
-            return float(numerator) / float(denominator)
+            return num_f / den_f
         except ValueError:
             return None
     try:
-        return float(text)
+        val = float(text)
+        return val if val > 0 else None
     except ValueError:
         return None
 
@@ -102,6 +117,8 @@ def match_option(options: list[Any], requested: object) -> str | None:
     first by exact string, then by equal duration. Returns ``None`` when the
     value is not on offer.
     """
+    if requested is None:
+        return None
     wanted = str(requested).strip()
     advertised = [str(option) for option in options]
     if wanted in advertised:
@@ -110,7 +127,8 @@ def match_option(options: list[Any], requested: object) -> str | None:
     if seconds is None:
         return None
     for option in advertised:
-        if shutter_seconds(option) == seconds:
+        opt_sec = shutter_seconds(option)
+        if opt_sec is not None and math.isclose(opt_sec, seconds, rel_tol=1e-5, abs_tol=1e-6):
             return option
     return None
 
@@ -132,6 +150,17 @@ class SonyCamera:
         self.endpoint = endpoint
         self.rpc = client or RpcClient(endpoint, recorder=recorder)
         self.capabilities = CapabilitySets()
+
+    @property
+    def is_simulated(self) -> bool:
+        """True if the camera endpoint points to a local simulated instance or test double."""
+        ep = self.endpoint.lower()
+        return (
+            "127.0.0.1" in ep
+            or "localhost" in ep
+            or "::1" in ep
+            or getattr(self.rpc, "is_simulated", False)
+        )
 
     # ------------------------------------------------------------------ identity
 
@@ -205,6 +234,9 @@ class SonyCamera:
 
     def get_exposure_compensation(self) -> RpcResult:
         return self.rpc.call("getExposureCompensation")
+
+    def get_available_exposure_compensation(self) -> RpcResult:
+        return self.rpc.call("getAvailableExposureCompensation")
 
     def set_exposure_compensation(self, value: int) -> RpcResult:
         return self.rpc.call("setExposureCompensation", [value])

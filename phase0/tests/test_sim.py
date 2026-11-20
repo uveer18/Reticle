@@ -28,6 +28,7 @@ from reticle0.sony import SonyCamera  # noqa: E402
 class SimHarness:
     def __enter__(self) -> "SimHarness":
         sim.CAMERA.reset()
+        sim.CAMERA.fast_mode = True
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), sim.Handler)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -104,6 +105,90 @@ class SimEndToEndTests(unittest.TestCase):
         self.assertEqual(camera.flat_list(camera.get_shutter_speed()), ['2"'])
         self.assertTrue(camera.set_iso_speed_rate("400").ok)
         self.assertEqual(camera.flat_list(camera.get_iso_speed_rate()), ["400"])
+
+    def test_postview_endpoint_serves_valid_jpeg(self) -> None:
+        import requests
+        res = requests.get(f"{self.harness.base}/postview/IMG0001.JPG", timeout=5.0)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.headers.get("Content-Type"), "image/jpeg")
+        # Starts with SOI (0xFFD8) and ends with EOI (0xFFD9)
+        self.assertTrue(res.content.startswith(b"\xff\xd8"))
+        self.assertTrue(res.content.endswith(b"\xff\xd9"))
+
+    def test_error_injection_scenario(self) -> None:
+        camera = self.camera()
+        sim.CAMERA.inject_error("actTakePicture", 40401, "Camera Not Ready: simulated fault")
+        res = camera.take_picture()
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error_code, 40401)
+        self.assertIn("simulated fault", res.error[1])
+
+        sim.CAMERA.clear_errors()
+        res_after = camera.take_picture()
+        self.assertTrue(res_after.ok)
+
+    def test_shoot_mode_transitions_and_capture_rejection(self) -> None:
+        camera = self.camera()
+        self.assertEqual(camera.flat_list(camera.get_shoot_mode()), ["still"])
+
+        # Switch to movie mode
+        self.assertTrue(camera.set_shoot_mode("movie").ok)
+        self.assertEqual(camera.flat_list(camera.get_shoot_mode()), ["movie"])
+
+        # Capturing still in movie mode should fail with error 40400
+        res = camera.take_picture()
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error_code, 40400)
+
+        # Switch back to still mode
+        self.assertTrue(camera.set_shoot_mode("still").ok)
+        self.assertTrue(camera.take_picture().ok)
+
+    def test_storage_error_scenario(self) -> None:
+        camera = self.camera()
+        sim.CAMERA.storage_status = "Memory Card Error"
+        storage_info = camera.get_storage_information()
+        self.assertTrue(storage_info.ok)
+        self.assertEqual(storage_info.result[0][0]["status"], "Memory Card Error")
+
+        # Take picture should be refused
+        res = camera.take_picture()
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error_code, 40401)
+
+    def test_exposure_compensation_and_white_balance_simulation(self) -> None:
+        camera = self.camera()
+        # Exposure compensation
+        avail = camera.get_available_exposure_compensation()
+        self.assertTrue(avail.ok)
+        self.assertEqual(avail.result, [0, 6, -6, 1])
+
+        self.assertTrue(camera.set_exposure_compensation(2).ok)
+        self.assertEqual(camera.flat_list(camera.get_exposure_compensation()), [2])
+
+        # Out-of-bounds exposure compensation index
+        self.assertFalse(camera.set_exposure_compensation(99).ok)
+
+        # White balance
+        wb_avail = camera.get_available_white_balance()
+        self.assertTrue(wb_avail.ok)
+        self.assertIn("Daylight", wb_avail.result[1])
+
+        self.assertTrue(camera.set_white_balance("Daylight").ok)
+        self.assertEqual(camera.flat_list(camera.get_white_balance()), ["Daylight"])
+        self.assertFalse(camera.set_white_balance("InvalidWB").ok)
+
+    def test_simulated_40402_recovery(self) -> None:
+        from reticle0.events import EventStream
+        from unittest import mock
+
+        camera = self.camera()
+        sim.CAMERA.simulate_40402_count = 1
+        stream = EventStream(camera, recorder=self.recorder)
+        with mock.patch("reticle0.events.time.sleep", lambda *_: None):
+            tick = stream.poll_once()
+        self.assertIsNone(tick.error_code)
+        self.assertTrue(tick.events)
 
 
 if __name__ == "__main__":

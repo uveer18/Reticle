@@ -28,7 +28,7 @@ REPO = ROOT.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from reticle0 import descriptor, net, ssdp  # noqa: E402
+from reticle0 import __version__, descriptor, net, ssdp  # noqa: E402
 from reticle0.capture import capture_once  # noqa: E402
 from reticle0.events import EventStream  # noqa: E402
 from reticle0.probe import render_markdown, run_probe  # noqa: E402
@@ -159,10 +159,12 @@ def _camera_for(args: argparse.Namespace, recorder: Recorder) -> SonyCamera | No
     endpoint = _resolve_endpoint(args, recorder)
     if not endpoint:
         return None
-    if "127.0.0.1" in endpoint or "localhost" in endpoint:
+    cam = SonyCamera(endpoint, recorder=recorder)
+    if cam.is_simulated:
         print("\n*** SIMULATED CAMERA - results are not hardware measurements ***")
+        recorder.simulated = True
     print(f"\nendpoint: {endpoint}")
-    return SonyCamera(endpoint, recorder=recorder)
+    return cam
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
@@ -176,18 +178,21 @@ def cmd_probe(args: argparse.Namespace) -> int:
 
     rule("Read-only capability probe")
     report = run_probe(camera, recorder)
-    if "127.0.0.1" in camera.endpoint or "localhost" in camera.endpoint:
+    if camera.is_simulated:
         report["simulated"] = True
 
     (out / "capabilities.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     markdown = render_markdown(report)
     (out / "capability-matrix.md").write_text(markdown, encoding="utf-8")
 
-    if args.publish and not report.get("simulated"):
-        target = REPO / "docs" / "phase0" / "02-capability-matrix.md"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(markdown, encoding="utf-8")
-        print(f"\npublished: {target}")
+    if args.publish:
+        if report.get("simulated"):
+            print("\nNotice: skipped publishing simulated capability matrix to docs/phase0/.")
+        else:
+            target = REPO / "docs" / "phase0" / "02-capability-matrix.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(markdown, encoding="utf-8")
+            print(f"\npublished: {target}")
 
     derived = report.get("derived", {})
     rule("Summary")
@@ -211,6 +216,13 @@ def cmd_probe(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------- Phase E
 
 def cmd_events(args: argparse.Namespace) -> int:
+    if args.count <= 0:
+        print("Error: --count must be a positive integer.")
+        return 2
+    if args.seconds <= 0:
+        print("Error: --seconds must be a positive number.")
+        return 2
+
     print(BANNER)
     out = artifact_dir("events")
     recorder = Recorder(out / "trace.jsonl")
@@ -253,6 +265,10 @@ def _shutter_target(camera: SonyCamera, requested: str) -> tuple[str | None, lis
 
 
 def cmd_capture(args: argparse.Namespace) -> int:
+    if args.budget is not None and args.budget <= 0:
+        print("Error: --budget must be a positive number.")
+        return 2
+
     print(BANNER)
     out = artifact_dir("capture")
     recorder = Recorder(out / "trace.jsonl")
@@ -305,6 +321,21 @@ def cmd_capture(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------- settings
 
 def cmd_set(args: argparse.Namespace) -> int:
+    requested = any(
+        value is not None
+        for value in (args.shutter, args.iso, args.fnumber, args.exposure_comp)
+    )
+    if not requested:
+        print("Nothing requested. Use --shutter / --iso / --fnumber / --exposure-comp.")
+        return 2
+
+    if args.exposure_comp is not None:
+        try:
+            args.exposure_comp = int(args.exposure_comp)
+        except (TypeError, ValueError):
+            print(f"Error: --exposure-comp must be an integer index, got {args.exposure_comp}")
+            return 2
+
     print(BANNER)
     out = artifact_dir("set")
     recorder = Recorder(out / "trace.jsonl")
@@ -314,13 +345,6 @@ def cmd_set(args: argparse.Namespace) -> int:
         return 2
 
     camera.load_capabilities()
-    requested = any(
-        value is not None
-        for value in (args.shutter, args.iso, args.fnumber, args.exposure_comp)
-    )
-    if not requested:
-        print("Nothing requested. Use --shutter / --iso / --fnumber / --exposure-comp.")
-        return 2
 
     shutter_options: list[str] = []
     if args.shutter is not None:
@@ -353,32 +377,46 @@ def cmd_set(args: argparse.Namespace) -> int:
         return 0
 
     applied: list[str] = []
+    failed: list[str] = []
 
     if args.shutter is not None:
         result = camera.set_shutter_speed(args.shutter)
         print(f"setShutterSpeed({args.shutter}) -> {result.error or 'ok'}")
         if result.ok:
             applied.append(f"shutter={_read_back(camera.get_shutter_speed())}")
+        else:
+            failed.append(f"shutter ({result.error})")
 
     if args.iso is not None:
         result = camera.set_iso_speed_rate(args.iso)
         print(f"setIsoSpeedRate({args.iso}) -> {result.error or 'ok'}")
         if result.ok:
             applied.append(f"iso={_read_back(camera.get_iso_speed_rate())}")
+        else:
+            failed.append(f"iso ({result.error})")
 
     if args.fnumber is not None:
         result = camera.set_f_number(args.fnumber)
         print(f"setFNumber({args.fnumber}) -> {result.error or 'ok'}")
         if result.ok:
             applied.append(f"fnumber={_read_back(camera.get_f_number())}")
+        else:
+            failed.append(f"fnumber ({result.error})")
 
     if args.exposure_comp is not None:
         result = camera.set_exposure_compensation(args.exposure_comp)
         print(f"setExposureCompensation({args.exposure_comp}) -> {result.error or 'ok'}")
+        if result.ok:
+            applied.append(f"exposure_comp={_read_back(camera.get_exposure_compensation())}")
+        else:
+            failed.append(f"exposure_comp ({result.error})")
 
     for line in applied:
         print(f"read-back: {line}")
     print(f"trace: {out / 'trace.jsonl'}")
+    if failed:
+        print(f"\nFAILED to apply: {', '.join(failed)}")
+        return 3
     return 0
 
 
@@ -405,6 +443,7 @@ def cmd_sim(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="run.py", description=BANNER)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
@@ -438,7 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
     setting.add_argument("--shutter", help="1/125, 20 (seconds), or an exact value from probe")
     setting.add_argument("--iso")
     setting.add_argument("--fnumber")
-    setting.add_argument("--exposure-comp", type=float)
+    setting.add_argument("--exposure-comp", type=int, help="exposure compensation step index (e.g. 0, 1, -2)")
     setting.add_argument("--dry-run", action="store_true")
     setting.set_defaults(func=cmd_set)
 

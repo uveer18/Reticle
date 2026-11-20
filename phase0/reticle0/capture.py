@@ -35,6 +35,7 @@ class CaptureResult:
     postview_urls: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     timeline: list[dict[str, Any]] = field(default_factory=list)
+    simulated: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +50,7 @@ class CaptureResult:
             "postview_urls": self.postview_urls,
             "notes": self.notes,
             "timeline": self.timeline,
+            "simulated": self.simulated,
         }
 
 
@@ -63,7 +65,10 @@ def capture_once(
 ) -> CaptureResult:
     """Take exactly one still and time it end to end."""
     stream = EventStream(camera, recorder=recorder)
-    result = CaptureResult(requested_shutter=shutter if set_shutter else None)
+    result = CaptureResult(
+        requested_shutter=shutter if set_shutter else None,
+        simulated=getattr(camera, "is_simulated", False),
+    )
 
     before = stream.snapshot()
     result.status_before = (before.events.get("cameraStatus") or {}).get("cameraStatus")

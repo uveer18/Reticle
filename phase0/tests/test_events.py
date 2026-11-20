@@ -68,6 +68,31 @@ class EventStreamTests(unittest.TestCase):
         stream = EventStream(SonyCamera(support.ENDPOINT, client=client))
         self.assertEqual(list(stream.stream(max_events=5, seconds=0)), [])
 
+    def test_poll_once_custom_timeout_does_not_mutate_instance(self) -> None:
+        client = support.ScriptedClient([support.ok([{"type": "cameraStatus", "cameraStatus": "IDLE"}])])
+        stream = EventStream(SonyCamera(support.ENDPOINT, client=client), timeout=70.0)
+        tick = stream.poll_once(timeout=5.0)
+        self.assertEqual(client.calls[0]["timeout"], 5.0)
+        self.assertEqual(stream.timeout, 70.0, "poll_once with explicit timeout must not mutate stream.timeout")
+
+    def test_stream_preserves_instance_timeout(self) -> None:
+        client = support.ScriptedClient(
+            [
+                support.ok([{"type": "cameraStatus", "cameraStatus": "IDLE"}]),
+                support.ok([{"type": "cameraStatus", "cameraStatus": "StillSaving"}]),
+            ]
+        )
+        stream = EventStream(SonyCamera(support.ENDPOINT, client=client), timeout=70.0)
+        with mock.patch("reticle0.events.time.sleep", lambda *_: None):
+            ticks = list(stream.stream(max_events=2, seconds=10.0))
+        self.assertEqual(len(ticks), 2)
+        self.assertEqual(stream.timeout, 70.0, "stream() must not permanently mutate stream.timeout")
+
+    def test_camera_status_returns_none_when_empty(self) -> None:
+        client = support.ScriptedClient([support.ok([])])
+        stream = EventStream(SonyCamera(support.ENDPOINT, client=client))
+        self.assertIsNone(stream.camera_status())
+
 
 if __name__ == "__main__":
     unittest.main()

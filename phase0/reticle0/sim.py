@@ -46,9 +46,17 @@ METHODS = [
     ["getAvailableFNumber", [], ["string*"], "1.0"],
     ["setFNumber", ["string"], ["int"], "1.0"],
     ["getExposureCompensation", [], ["int"], "1.0"],
+    ["getAvailableExposureCompensation", [], ["int", "int", "int", "int"], "1.0"],
     ["setExposureCompensation", ["int"], ["int"], "1.0"],
     ["getWhiteBalance", [], ["string"], "1.0"],
+    ["getAvailableWhiteBalance", [], ["string", "string*"], "1.0"],
+    ["setWhiteBalance", ["string"], ["int"], "1.0"],
     ["getStorageInformation", [], ["{...}"], "1.0"],
+]
+
+WHITE_BALANCES = [
+    "Auto WB", "Daylight", "Shade", "Cloudy", "Incandescent",
+    "Fluorescent: Warm White", "Flash",
 ]
 
 
@@ -65,33 +73,61 @@ class FakeCamera:
         self.iso = "AUTO"
         self.fnumber = "4.0"
         self.exposure_compensation = 0
+        self.white_balance = "Auto WB"
+        self.shoot_mode = "still"
         self.status = "IDLE"
         self.pending_awaits = 0
         self.shots = 0
+        self.storage_status = "Normal"
+        self.error_injections: dict[str, tuple[int, str]] = {}
+        self.simulate_40402_count = 0
+        self.fast_mode = False
+
+    def inject_error(self, method: str, code: int, message: str) -> None:
+        """Inject a simulated error response for a specific JSON-RPC method."""
+        with self.lock:
+            self.error_injections[method] = (code, message)
+
+    def clear_errors(self) -> None:
+        """Clear all injected errors."""
+        with self.lock:
+            self.error_injections.clear()
 
     def shoot(self) -> dict:
         with self.lock:
+            if "actTakePicture" in self.error_injections:
+                code, msg = self.error_injections["actTakePicture"]
+                return {"error": [code, msg]}
+            if self.shoot_mode != "still":
+                return {"error": [40400, f"Shooting Error: shoot mode is '{self.shoot_mode}', not 'still'"]}
+            if self.storage_status != "Normal":
+                return {"error": [40401, f"Camera Not Ready: storage {self.storage_status}"]}
             self.shots += 1
             seconds = _seconds(self.shutter)
+            delay = 0.01 if self.fast_mode else 0.12
             if seconds >= 1.0:
                 # Mirror the documented long-exposure behaviour.
                 self.status = "StillCapturing"
                 self.pending_awaits = 3
-                time.sleep(0.12)
+                time.sleep(delay)
                 return {"error": [40403, "Still Capturing Not Finished"]}
             self.status = "StillSaving"
-            time.sleep(0.12)
+            time.sleep(delay)
             self.status = "IDLE"
             return {"result": [[f"http://127.0.0.1:10000/postview/IMG{self.shots:04d}.JPG"]]}
 
     def await_picture(self) -> dict:
         with self.lock:
-            time.sleep(0.4)
+            if "awaitTakePicture" in self.error_injections:
+                code, msg = self.error_injections["awaitTakePicture"]
+                return {"error": [code, msg]}
+            delay = 0.01 if self.fast_mode else 0.4
+            time.sleep(delay)
             if self.pending_awaits > 0:
                 self.pending_awaits -= 1
                 if self.pending_awaits == 0:
                     self.status = "StillSaving"
-                    time.sleep(0.1)
+                    time.sleep(0.01 if self.fast_mode else 0.1)
                     self.status = "IDLE"
                     return {"result": [[f"http://127.0.0.1:10000/postview/IMG{self.shots:04d}.JPG"]]}
                 return {"error": [40403, "Still Capturing Not Finished"]}
@@ -101,9 +137,9 @@ class FakeCamera:
         with self.lock:
             return [
                 {"type": "cameraStatus", "cameraStatus": self.status},
-                {"type": "shootMode", "currentShootMode": "still", "availableShootModes": ["still", "movie"]},
+                {"type": "shootMode", "currentShootMode": self.shoot_mode, "availableShootModes": ["still", "movie"]},
                 {"type": "liveviewStatus", "liveviewStatus": False},
-                {"type": "storageInformation", "storageInformation": [{"slotNumber": 1, "status": "Normal"}]},
+                {"type": "storageInformation", "storageInformation": [{"slotNumber": 1, "status": self.storage_status}]},
                 {"type": "availableApiList", "names": AVAILABLE},
             ]
 
@@ -119,17 +155,23 @@ def _seconds(shutter: str) -> float:
 
 AVAILABLE = [
     "getApplicationInfo", "getVersions", "getMethodTypes", "getAvailableApiList",
-    "getEvent", "getShootMode", "actTakePicture", "awaitTakePicture",
+    "getEvent", "getShootMode", "setShootMode", "actTakePicture", "awaitTakePicture",
     "getShutterSpeed", "getAvailableShutterSpeed", "setShutterSpeed",
     "getIsoSpeedRate", "getAvailableIsoSpeedRate", "setIsoSpeedRate",
     "getFNumber", "getAvailableFNumber", "setFNumber",
-    "getExposureCompensation", "setExposureCompensation", "getWhiteBalance",
+    "getExposureCompensation", "getAvailableExposureCompensation", "setExposureCompensation",
+    "getWhiteBalance", "getAvailableWhiteBalance", "setWhiteBalance",
     "getStorageInformation",
 ]
 CAMERA = FakeCamera()
 
 
 def _dispatch(method: str, params: list) -> dict:
+    with CAMERA.lock:
+        if method in CAMERA.error_injections:
+            code, msg = CAMERA.error_injections[method]
+            return {"error": [code, msg]}
+
     if method == "getApplicationInfo":
         return {"result": ["Smart Remote Control", "2.0.0"]}
     if method == "getVersions":
@@ -139,12 +181,19 @@ def _dispatch(method: str, params: list) -> dict:
     if method == "getAvailableApiList":
         return {"result": [AVAILABLE]}
     if method == "getEvent":
+        with CAMERA.lock:
+            if CAMERA.simulate_40402_count > 0:
+                CAMERA.simulate_40402_count -= 1
+                return {"error": [40402, "Already Polling"]}
         if params and params[0]:
-            time.sleep(0.8)
+            time.sleep(0.01 if CAMERA.fast_mode else 0.8)
         return {"result": CAMERA.event_payload()}
     if method == "getShootMode":
-        return {"result": ["still"]}
+        return {"result": [CAMERA.shoot_mode]}
     if method == "setShootMode":
+        if not params or str(params[0]) not in ("still", "movie"):
+            return {"error": [3, "Illegal Argument"]}
+        CAMERA.shoot_mode = str(params[0])
         return {"result": [0]}
     if method == "getShutterSpeed":
         return {"result": [CAMERA.shutter]}
@@ -171,13 +220,28 @@ def _dispatch(method: str, params: list) -> dict:
         return {"result": [0]}
     if method == "getExposureCompensation":
         return {"result": [CAMERA.exposure_compensation]}
+    if method == "getAvailableExposureCompensation":
+        return {"result": [CAMERA.exposure_compensation, 6, -6, 1]}
     if method == "setExposureCompensation":
-        CAMERA.exposure_compensation = int(params[0])
-        return {"result": [0]}
+        try:
+            val = int(params[0])
+            if not (-6 <= val <= 6):
+                return {"error": [3, "Illegal Argument"]}
+            CAMERA.exposure_compensation = val
+            return {"result": [0]}
+        except (IndexError, TypeError, ValueError):
+            return {"error": [3, "Illegal Argument"]}
     if method == "getWhiteBalance":
-        return {"result": ["Auto WB"]}
+        return {"result": [CAMERA.white_balance]}
+    if method == "getAvailableWhiteBalance":
+        return {"result": [CAMERA.white_balance, WHITE_BALANCES]}
+    if method == "setWhiteBalance":
+        if not params or params[0] not in WHITE_BALANCES:
+            return {"error": [3, "Illegal Argument"]}
+        CAMERA.white_balance = str(params[0])
+        return {"result": [0]}
     if method == "getStorageInformation":
-        return {"result": [[{"slotNumber": 1, "status": "Normal"}]]}
+        return {"result": [[{"slotNumber": 1, "status": CAMERA.storage_status}]]}
     if method == "actTakePicture":
         return CAMERA.shoot()
     if method == "awaitTakePicture":
@@ -224,6 +288,18 @@ class Handler(BaseHTTPRequestHandler):
                 "</root>\n"
             )
             self._send(200, xml.encode("utf-8"), "text/xml; charset=utf-8")
+        elif self.path.startswith("/postview/"):
+            # Minimal 1x1 valid JPEG bytes for testing offline image retrieval
+            dummy_jpeg = (
+                b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+                b"\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c"
+                b"\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c"
+                b"\x1c $.' \",#\x1c\x1c(7),01444\x1f'9=82<.342\xff\xc0\x00\x0b\x08\x00\x01"
+                b"\x00\x01\x01\x01\x11\x00\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01"
+                b"\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08"
+                b"\t\n\x0b\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xbf\x00\xff\xd9"
+            )
+            self._send(200, dummy_jpeg, "image/jpeg")
         else:
             self._send(404, b"not found", "text/plain")
 

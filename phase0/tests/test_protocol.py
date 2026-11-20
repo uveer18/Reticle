@@ -238,6 +238,82 @@ class SonyShapeTests(unittest.TestCase):
         self.assertTrue(camera.capabilities.supports("startLiveview"))
         self.assertFalse(camera.capabilities.is_available("startLiveview"))
 
+    def test_sony_camera_is_simulated(self) -> None:
+        local_cam = SonyCamera("http://127.0.0.1:10000/sony/camera")
+        self.assertTrue(local_cam.is_simulated)
+        named_local = SonyCamera("http://localhost:10000/sony/camera")
+        self.assertTrue(named_local.is_simulated)
+        remote_cam = SonyCamera("http://192.168.122.1:10000/sony/camera")
+        self.assertFalse(remote_cam.is_simulated)
+
+    def test_get_available_exposure_compensation(self) -> None:
+        client = support.CannedClient({"getAvailableExposureCompensation": support.ok([0, 6, -6, 1])})
+        camera = SonyCamera(support.ENDPOINT, client=client)
+        result = camera.get_available_exposure_compensation()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.result, [0, 6, -6, 1])
+        self.assertIn("getAvailableExposureCompensation", client.calls)
+
+    def test_rpc_result_convenience_properties(self) -> None:
+        ok_res = support.ok([0], method="actTakePicture")
+        self.assertFalse(ok_res.is_error)
+        self.assertIsNone(ok_res.error_message)
+
+        err_res = support.error(40401, "Camera Not Ready", method="actTakePicture")
+        self.assertTrue(err_res.is_error)
+        self.assertEqual(err_res.error_message, "Camera Not Ready")
+
+        trans_res = RpcResult(
+            method="actTakePicture",
+            endpoint=support.ENDPOINT,
+            http_status=None,
+            latency_ms=5.0,
+            payload=None,
+            transport_error="Connection refused",
+        )
+        self.assertTrue(trans_res.is_error)
+        self.assertEqual(trans_res.error_message, "Connection refused")
+
+    def test_rpc_client_thread_safe_ids(self) -> None:
+        import concurrent.futures
+
+        session = support.FakeSession()
+        client = RpcClient(support.ENDPOINT, session=session)  # type: ignore[arg-type]
+
+        def call_rpc() -> int:
+            return client._take_id()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            ids = list(pool.map(lambda _: call_rpc(), range(100)))
+
+        self.assertEqual(len(set(ids)), 100)
+        self.assertEqual(sorted(ids), list(range(1, 101)))
+
+
+class ProvenanceTests(unittest.TestCase):
+    def test_recorder_provenance_tagging(self) -> None:
+        import json
+        import tempfile
+        from reticle0.recorder import Recorder, _summary
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_path = Path(tmpdir) / "trace.jsonl"
+            rec_sim = Recorder(trace_path, echo=False, simulated=True)
+            rec_sim.event("test_sim", data=123)
+
+            rec_hw = Recorder(trace_path, echo=False, simulated=False)
+            rec_hw.event("test_hw", data=456)
+
+            lines = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(lines[0]["provenance"], "simulated")
+            self.assertEqual(lines[1]["provenance"], "hardware")
+
+            summary_sim = _summary({"kind": "rpc", "method": "actTakePicture", "latency_ms": 1.0, "http_status": 200, "provenance": "simulated"})
+            self.assertIn("[SIM]", summary_sim)
+
+            summary_hw = _summary({"kind": "rpc", "method": "actTakePicture", "latency_ms": 1.0, "http_status": 200, "provenance": "hardware"})
+            self.assertNotIn("[SIM]", summary_hw)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ Deliberate properties, each traceable to a project constraint:
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -49,6 +50,15 @@ class RpcResult:
     @property
     def ok(self) -> bool:
         return self.transport_error is None and "error" not in self.payload and self.http_status == 200
+
+    @property
+    def is_error(self) -> bool:
+        return not self.ok
+
+    @property
+    def error_message(self) -> str | None:
+        err = self.error
+        return err[1] if err else self.transport_error
 
     @property
     def result(self) -> Any:
@@ -95,13 +105,17 @@ class RpcClient:
         self.endpoint = endpoint
         self.recorder = recorder
         self.session = session or requests.Session()
+        self._lock = threading.Lock()
         self._next_id = 1
+        ep = endpoint.lower()
+        self.is_simulated = "127.0.0.1" in ep or "localhost" in ep or "::1" in ep
 
     def _take_id(self) -> int:
         # Sony forbids id 0; the id space is 1..2_147_483_647.
-        current = self._next_id
-        self._next_id = 1 if current >= 2_147_483_647 else current + 1
-        return current
+        with self._lock:
+            current = self._next_id
+            self._next_id = 1 if current >= 2_147_483_647 else current + 1
+            return current
 
     def call(
         self,

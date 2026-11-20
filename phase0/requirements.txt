@@ -1,0 +1,3 @@
+# Phase 0 deliberately has one runtime dependency.
+# The camera is on a DIRECT- Wi-Fi network with no internet access, so keep this thin.
+requests>=2.31

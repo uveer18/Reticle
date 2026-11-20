@@ -1,0 +1,6 @@
+# Phase 0 run evidence is machine-specific; keep the schema, drop the data.
+artifacts/
+__pycache__/
+*.pyc
+.venv/
+venv/

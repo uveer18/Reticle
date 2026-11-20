@@ -140,3 +140,4 @@ def discover_all_interfaces(**kwargs: object) -> list[DiscoveryResult]:
         except OSError:
             continue  # interface refused multicast; try the next one
     return list(merged.values())
+

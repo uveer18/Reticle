@@ -57,6 +57,7 @@ class CaptureTests(unittest.TestCase):
         camera, client = camera_with(
             [
                 IDLE,                            # snapshot_before
+                support.ok(["1/125", ["1\"", "2\"", "20\"", "30\""]]),  # getAvailableShutterSpeed
                 support.ok([0]),                 # setShutterSpeed
                 support.ok(['20"']),             # getShutterSpeed read-back
                 IDLE,                            # preflight_status
@@ -82,6 +83,7 @@ class CaptureTests(unittest.TestCase):
             methods,
             [
                 "getEvent",
+                "getAvailableShutterSpeed",
                 "setShutterSpeed",
                 "getShutterSpeed",
                 "getEvent",
@@ -130,11 +132,12 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(result.await_calls, 0)
 
     def test_rejected_shutter_speed_stops_before_the_shutter_release(self) -> None:
-        camera, client = camera_with([IDLE, support.error(3, "Illegal Argument"), IDLE])
+        camera, client = camera_with([IDLE, support.ok(["1/125", ["1/125", "1\"", "2\""]])])
         result = capture_once(camera, self.recorder, shutter="BULB", set_shutter=True)
         self.assertEqual(result.outcome, "error")
-        self.assertTrue(any("setShutterSpeed" in note for note in result.notes))
+        self.assertTrue(any("not in getAvailableShutterSpeed" in note or "BULB" in note for note in result.notes))
         self.assertNotIn("actTakePicture", [call["method"] for call in client.calls])
+        self.assertNotIn("setShutterSpeed", [call["method"] for call in client.calls])
 
     def test_40403_on_act_is_not_treated_as_a_failure(self) -> None:
         camera, _ = camera_with([IDLE, IDLE, support.error(40403, "Still Capturing Not Finished"), support.ok([[URL]]), IDLE])
@@ -237,11 +240,64 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual([c["method"] for c in client.calls].count("actTakePicture"), 1)
 
     def test_ambiguous_set_shutter_aborts_before_act(self) -> None:
-        camera, client = camera_with([IDLE, ambiguous("setShutterSpeed"), IDLE])
+        camera, client = camera_with([IDLE, ambiguous("getAvailableShutterSpeed")])
         result = capture_once(camera, self.recorder, shutter='20"', set_shutter=True)
         self.assertEqual(result.outcome, "ambiguous")
         self.assertNotIn("actTakePicture", [c["method"] for c in client.calls])
         self.assertTrue(any("aborted before actTakePicture" in n for n in result.notes))
+
+    def test_ambiguous_set_shutter_after_validation_aborts_before_act(self) -> None:
+        camera, client = camera_with(
+            [
+                IDLE,
+                support.ok(["1/125", ["1\"", "20\"", "30\""]]),
+                ambiguous("setShutterSpeed"),
+            ]
+        )
+        result = capture_once(camera, self.recorder, shutter="20", set_shutter=True)
+        self.assertEqual(result.outcome, "ambiguous")
+        self.assertNotIn("actTakePicture", [c["method"] for c in client.calls])
+
+    def test_readback_mismatch_aborts_before_act(self) -> None:
+        camera, client = camera_with(
+            [
+                IDLE,
+                support.ok(["1/125", ["1\"", "20\"", "30\""]]),
+                support.ok([0]),
+                support.ok(['1"']),
+            ]
+        )
+        result = capture_once(camera, self.recorder, shutter="20", set_shutter=True)
+        self.assertEqual(result.outcome, "error")
+        self.assertTrue(any("readback mismatch" in n.lower() for n in result.notes))
+        self.assertNotIn("actTakePicture", [c["method"] for c in client.calls])
+
+    def test_readback_failure_aborts_before_act(self) -> None:
+        camera, client = camera_with(
+            [
+                IDLE,
+                support.ok(["1/125", ["1\"", "20\"", "30\""]]),
+                support.ok([0]),
+                support.error(403, "Forbidden"),
+            ]
+        )
+        result = capture_once(camera, self.recorder, shutter="20", set_shutter=True)
+        self.assertEqual(result.outcome, "error")
+        self.assertTrue(any("readback failed" in n.lower() for n in result.notes))
+        self.assertNotIn("actTakePicture", [c["method"] for c in client.calls])
+
+    def test_readback_ambiguous_aborts_before_act(self) -> None:
+        camera, client = camera_with(
+            [
+                IDLE,
+                support.ok(["1/125", ["1\"", "20\"", "30\""]]),
+                support.ok([0]),
+                ambiguous("getShutterSpeed"),
+            ]
+        )
+        result = capture_once(camera, self.recorder, shutter="20", set_shutter=True)
+        self.assertEqual(result.outcome, "ambiguous")
+        self.assertNotIn("actTakePicture", [c["method"] for c in client.calls])
 
 
 if __name__ == "__main__":

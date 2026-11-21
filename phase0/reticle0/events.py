@@ -9,10 +9,22 @@ Rules encoded here:
 * At most one long-poll in flight. A second concurrent request earns error 40402.
 * When a response arrives (or the client times out), re-arm immediately.
 * Never spin: any repeat after a transport failure is delayed.
+
+Concurrency contract:
+* ``EventStream`` enforces single-owner long polling. Only one ``poll_once`` /
+  ``stream`` long-poll request may be active per instance at a time; concurrent
+  long-poll attempts fail fast with ``RuntimeError``.
+* ``snapshot()`` uses ``polling=false`` and does not take the long-poll owner
+  lock, so capture/status preflight can proceed without waiting for a parked
+  long poll to finish.
+* Callers must not share the same ``SonyCamera``/``requests.Session`` across
+  unsynchronized threads for unrelated mutating operations. Long-poll ownership
+  prevents concurrent polling, not all RPC concurrency.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Iterator
@@ -58,6 +70,12 @@ class EventStream:
         self.camera = camera
         self.recorder = recorder
         self.timeout = timeout
+        self._poll_lock = threading.Lock()
+        self._poll_owner: int | None = None
+
+    @property
+    def poll_in_flight(self) -> bool:
+        return self._poll_owner is not None
 
     def snapshot(self) -> EventTick:
         """Immediate, complete state read (``polling=false``)."""
@@ -70,20 +88,32 @@ class EventStream:
         )
 
     def poll_once(self, *, timeout: float | None = None) -> EventTick:
-        """One long-poll attempt, including 40402 recovery."""
-        effective_timeout = timeout if timeout is not None else self.timeout
-        result = self.camera.get_event(polling=True, timeout=effective_timeout)
-        if result.error_code == ERR_ALREADY_POLLING:
-            # A previous read timed out client-side but is still parked server-side.
-            # Let it drain, then retry exactly once.
-            time.sleep(1.0)
+        """One long-poll attempt, including 40402 recovery.
+
+        Enforces single-owner long polling. A concurrent long-poll attempt on the
+        same ``EventStream`` fails fast so callers cannot create overlapping
+        ``polling=true`` requests.
+        """
+        if not self._poll_lock.acquire(blocking=False):
+            raise RuntimeError("EventStream long-poll already in flight; single owner required")
+        self._poll_owner = threading.get_ident()
+        try:
+            effective_timeout = timeout if timeout is not None else self.timeout
             result = self.camera.get_event(polling=True, timeout=effective_timeout)
-        return EventTick(
-            events=flatten(result.result),
-            latency_ms=result.latency_ms,
-            timed_out=result.timed_out,
-            error_code=result.error_code,
-        )
+            if result.error_code == ERR_ALREADY_POLLING:
+                # A previous read timed out client-side but is still parked server-side.
+                # Let it drain, then retry exactly once.
+                time.sleep(1.0)
+                result = self.camera.get_event(polling=True, timeout=effective_timeout)
+            return EventTick(
+                events=flatten(result.result),
+                latency_ms=result.latency_ms,
+                timed_out=result.timed_out,
+                error_code=result.error_code,
+            )
+        finally:
+            self._poll_owner = None
+            self._poll_lock.release()
 
     def camera_status(self) -> str | None:
         tick = self.snapshot()

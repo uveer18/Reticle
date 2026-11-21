@@ -91,9 +91,48 @@ def capture_once(
     )
 
     if set_shutter and shutter:
-        applied = camera.set_shutter_speed(shutter)
+        resolved, options, resolve_err = camera.resolve_shutter_speed(shutter)
         result.timeline.append(
-            {"phase": "set_shutter", "value": shutter, "ok": applied.ok, "error": applied.error}
+            {
+                "phase": "validate_shutter",
+                "requested": shutter,
+                "resolved": resolved,
+                "options_count": len(options),
+                "ok": resolve_err.ok if resolve_err is not None else resolved is not None,
+                "error": resolve_err.error if resolve_err is not None else (None if resolved else "not available"),
+            }
+        )
+        if resolve_err is not None:
+            if resolve_err.is_ambiguous:
+                result.outcome = "ambiguous"
+                result.ambiguous_reason = (
+                    f"getAvailableShutterSpeed transport ambiguity: {resolve_err.transport_error}"
+                )
+                result.notes.append(
+                    "Shutter validation returned an ambiguous transport outcome; "
+                    "capture aborted before actTakePicture."
+                )
+            else:
+                result.outcome = "error"
+                result.notes.append(f"Shutter validation failed: {resolve_err.error}")
+            return result
+        if resolved is None:
+            result.outcome = "error"
+            result.notes.append(
+                f"Requested shutter {shutter!r} is not in getAvailableShutterSpeed options: {options}"
+            )
+            return result
+
+        applied = camera.set_shutter_speed(resolved, validate=False)
+        result.timeline.append(
+            {
+                "phase": "set_shutter",
+                "requested": shutter,
+                "value": resolved,
+                "ok": applied.ok,
+                "error": applied.error,
+                "ambiguous": applied.is_ambiguous,
+            }
         )
         if not applied.ok:
             if applied.is_ambiguous:
@@ -107,26 +146,46 @@ def capture_once(
                 )
             else:
                 result.outcome = "error"
-                result.notes.append(f"setShutterSpeed rejected {shutter}: {applied.error}")
+                result.notes.append(f"setShutterSpeed rejected {resolved}: {applied.error}")
             return result
+
         # The API notes the setting may still be in flight on the server.
         time.sleep(0.35)
         readback = camera.get_shutter_speed()
-        if readback.ok:
-            actual = str((readback.result or [None])[0])
-            result.requested_shutter = actual
-            if shutter_seconds(actual) is not None:
-                expected_seconds = shutter_seconds(actual)
-            result.timeline.append({"phase": "shutter_readback", "value": actual})
-        else:
-            result.timeline.append(
-                {
-                    "phase": "shutter_readback",
-                    "ok": False,
-                    "error": readback.error,
-                    "ambiguous": getattr(readback, "is_ambiguous", False),
-                }
+        result.timeline.append(
+            {
+                "phase": "shutter_readback",
+                "requested": resolved,
+                "ok": readback.ok,
+                "value": str((readback.result or [None])[0]) if readback.ok else None,
+                "error": readback.error,
+                "ambiguous": readback.is_ambiguous,
+            }
+        )
+        if not readback.ok:
+            if readback.is_ambiguous:
+                result.outcome = "ambiguous"
+                result.ambiguous_reason = (
+                    f"getShutterSpeed readback transport ambiguity: {readback.transport_error}"
+                )
+                result.notes.append(
+                    "Shutter readback was ambiguous; capture aborted before actTakePicture."
+                )
+            else:
+                result.outcome = "error"
+                result.notes.append(f"Shutter readback failed: {readback.error}")
+            return result
+
+        actual = str((readback.result or [None])[0])
+        result.requested_shutter = actual
+        if shutter_seconds(actual) is not None:
+            expected_seconds = shutter_seconds(actual)
+        if actual != resolved:
+            result.outcome = "error"
+            result.notes.append(
+                f"Shutter readback mismatch: requested {resolved!r}, camera reports {actual!r}"
             )
+            return result
 
     # Fresh preflight status check immediately before actTakePicture.
     preflight = stream.snapshot()

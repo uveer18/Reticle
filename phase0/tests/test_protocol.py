@@ -315,5 +315,56 @@ class ProvenanceTests(unittest.TestCase):
             self.assertNotIn("[SIM]", summary_hw)
 
 
+class SetterValidationTests(unittest.TestCase):
+    def test_set_shutter_speed_rejects_unavailable_value_before_sending(self) -> None:
+        client = support.ScriptedClient([support.ok(["1/125", ["1/125", "1\"", "2\""]])])
+        camera = SonyCamera(support.ENDPOINT, client=client)
+        result = camera.set_shutter_speed("BULB")
+        self.assertFalse(result.ok)
+        self.assertEqual([c["method"] for c in client.calls], ["getAvailableShutterSpeed"])
+
+    def test_set_shutter_speed_sends_exact_advertised_wire_value(self) -> None:
+        client = support.ScriptedClient(
+            [
+                support.ok(["1/125", ["1/125", "20\"", "30\""]]),
+                support.ok([0]),
+            ]
+        )
+        camera = SonyCamera(support.ENDPOINT, client=client)
+        result = camera.set_shutter_speed("20")
+        self.assertTrue(result.ok)
+        self.assertEqual(client.calls[1]["method"], "setShutterSpeed")
+        self.assertEqual(client.calls[1]["params"], ['20"'])
+
+    def test_set_iso_rejects_unavailable_value(self) -> None:
+        client = support.ScriptedClient([support.ok([["100", "200", "400"]])])
+        camera = SonyCamera(support.ENDPOINT, client=client)
+        result = camera.set_iso_speed_rate("99999")
+        self.assertFalse(result.ok)
+        self.assertEqual([c["method"] for c in client.calls], ["getAvailableIsoSpeedRate"])
+
+    def test_set_fnumber_rejects_unavailable_value(self) -> None:
+        client = support.ScriptedClient([support.ok([["2.8", "4.0", "5.6"]])])
+        camera = SonyCamera(support.ENDPOINT, client=client)
+        result = camera.set_f_number("1.2")
+        self.assertFalse(result.ok)
+        self.assertEqual([c["method"] for c in client.calls], ["getAvailableFNumber"])
+
+    def test_setters_preserve_json_rpc_param_arrays(self) -> None:
+        client = support.ScriptedClient(
+            [
+                support.ok([["100", "400"]]),
+                support.ok([0]),
+                support.ok([["2.8", "4.0"]]),
+                support.ok([0]),
+            ]
+        )
+        camera = SonyCamera(support.ENDPOINT, client=client)
+        self.assertTrue(camera.set_iso_speed_rate("400").ok)
+        self.assertTrue(camera.set_f_number("4.0").ok)
+        self.assertEqual(client.calls[1]["params"], ["400"])
+        self.assertEqual(client.calls[3]["params"], ["4.0"])
+
+
 if __name__ == "__main__":
     unittest.main()

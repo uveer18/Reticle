@@ -133,6 +133,21 @@ def match_option(options: list[Any], requested: object) -> str | None:
     return None
 
 
+def match_exact_option(options: list[Any], requested: object) -> str | None:
+    """Resolve a requested value against exact camera-advertised options.
+
+    Used for ISO/aperture where Sony wire values are opaque strings and should
+    not be heuristically rewritten.
+    """
+    if requested is None:
+        return None
+    wanted = str(requested).strip()
+    for option in options:
+        if str(option) == wanted:
+            return str(option)
+    return None
+
+
 def _version_key(value: str) -> tuple[int, ...]:
     parts = []
     for chunk in value.split("."):
@@ -205,13 +220,57 @@ class SonyCamera:
 
     # ------------------------------------------------------------------ exposure
 
+    def _validation_error(self, method: str, message: str) -> RpcResult:
+        return RpcResult(
+            method=method,
+            endpoint=self.endpoint,
+            http_status=None,
+            latency_ms=0.0,
+            payload={"error": [3, message]},
+            transport_error=None,
+        )
+
+    def resolve_shutter_speed(self, value: object) -> tuple[str | None, list[str], RpcResult | None]:
+        available = self.get_available_shutter_speed()
+        if not available.ok:
+            return None, [], available
+        options = [str(item) for item in self.available_options(available)]
+        resolved = match_option(options, value)
+        return resolved, options, None
+
+    def resolve_iso_speed_rate(self, value: object) -> tuple[str | None, list[str], RpcResult | None]:
+        available = self.get_available_iso_speed_rate()
+        if not available.ok:
+            return None, [], available
+        options = [str(item) for item in self.available_options(available)]
+        resolved = match_exact_option(options, value)
+        return resolved, options, None
+
+    def resolve_f_number(self, value: object) -> tuple[str | None, list[str], RpcResult | None]:
+        available = self.get_available_f_number()
+        if not available.ok:
+            return None, [], available
+        options = [str(item) for item in self.available_options(available)]
+        resolved = match_exact_option(options, value)
+        return resolved, options, None
+
     def get_shutter_speed(self) -> RpcResult:
         return self.rpc.call("getShutterSpeed")
 
     def get_available_shutter_speed(self) -> RpcResult:
         return self.rpc.call("getAvailableShutterSpeed")
 
-    def set_shutter_speed(self, value: str) -> RpcResult:
+    def set_shutter_speed(self, value: str, *, validate: bool = True) -> RpcResult:
+        if validate:
+            resolved, options, err = self.resolve_shutter_speed(value)
+            if err is not None:
+                return err
+            if resolved is None:
+                return self._validation_error(
+                    "setShutterSpeed",
+                    f"Requested shutter {value!r} is not in getAvailableShutterSpeed options: {options}",
+                )
+            value = resolved
         return self.rpc.call("setShutterSpeed", [value])
 
     def get_iso_speed_rate(self) -> RpcResult:
@@ -220,7 +279,17 @@ class SonyCamera:
     def get_available_iso_speed_rate(self) -> RpcResult:
         return self.rpc.call("getAvailableIsoSpeedRate")
 
-    def set_iso_speed_rate(self, value: str) -> RpcResult:
+    def set_iso_speed_rate(self, value: str, *, validate: bool = True) -> RpcResult:
+        if validate:
+            resolved, options, err = self.resolve_iso_speed_rate(value)
+            if err is not None:
+                return err
+            if resolved is None:
+                return self._validation_error(
+                    "setIsoSpeedRate",
+                    f"Requested ISO {value!r} is not in getAvailableIsoSpeedRate options: {options}",
+                )
+            value = resolved
         return self.rpc.call("setIsoSpeedRate", [value])
 
     def get_f_number(self) -> RpcResult:
@@ -229,7 +298,17 @@ class SonyCamera:
     def get_available_f_number(self) -> RpcResult:
         return self.rpc.call("getAvailableFNumber")
 
-    def set_f_number(self, value: str) -> RpcResult:
+    def set_f_number(self, value: str, *, validate: bool = True) -> RpcResult:
+        if validate:
+            resolved, options, err = self.resolve_f_number(value)
+            if err is not None:
+                return err
+            if resolved is None:
+                return self._validation_error(
+                    "setFNumber",
+                    f"Requested F number {value!r} is not in getAvailableFNumber options: {options}",
+                )
+            value = resolved
         return self.rpc.call("setFNumber", [value])
 
     def get_exposure_compensation(self) -> RpcResult:

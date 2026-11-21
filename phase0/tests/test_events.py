@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -92,6 +94,51 @@ class EventStreamTests(unittest.TestCase):
         client = support.ScriptedClient([support.ok([])])
         stream = EventStream(SonyCamera(support.ENDPOINT, client=client))
         self.assertIsNone(stream.camera_status())
+
+    def test_concurrent_long_poll_is_rejected(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingClient:
+            def call(self, method, params=None, *, version="1.0", timeout=10.0):
+                if params == [True]:
+                    started.set()
+                    release.wait(timeout=2)
+                    return support.ok([{"type": "cameraStatus", "cameraStatus": "IDLE"}])
+                return support.ok([{"type": "cameraStatus", "cameraStatus": "IDLE"}])
+
+        stream = EventStream(SonyCamera(support.ENDPOINT, client=BlockingClient()))
+        t = threading.Thread(target=stream.poll_once, kwargs={"timeout": 1.0})
+        t.start()
+        self.assertTrue(started.wait(timeout=1))
+        with self.assertRaises(RuntimeError):
+            stream.poll_once(timeout=0.1)
+        release.set()
+        t.join(timeout=2)
+        self.assertFalse(t.is_alive())
+
+    def test_snapshot_not_blocked_by_active_long_poll(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingClient:
+            def call(self, method, params=None, *, version="1.0", timeout=10.0):
+                if params == [True]:
+                    started.set()
+                    release.wait(timeout=2)
+                    return support.ok([{"type": "cameraStatus", "cameraStatus": "IDLE"}])
+                return support.ok([{"type": "cameraStatus", "cameraStatus": "IDLE"}])
+
+        camera = SonyCamera(support.ENDPOINT, client=BlockingClient())
+        stream = EventStream(camera)
+        t = threading.Thread(target=stream.poll_once, kwargs={"timeout": 1.0})
+        t.start()
+        self.assertTrue(started.wait(timeout=1))
+        snap = stream.snapshot()
+        self.assertEqual(snap.events["cameraStatus"]["cameraStatus"], "IDLE")
+        release.set()
+        t.join(timeout=2)
+        self.assertFalse(t.is_alive())
 
 
 if __name__ == "__main__":

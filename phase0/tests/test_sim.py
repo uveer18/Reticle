@@ -190,6 +190,28 @@ class SimEndToEndTests(unittest.TestCase):
         self.assertIsNone(tick.error_code)
         self.assertTrue(tick.events)
 
+    def test_rec_mode_command_end_to_end(self) -> None:
+        import argparse
+        import json
+        from unittest import mock
+        import run
+
+        with tempfile.TemporaryDirectory() as tmp_art:
+            with mock.patch("run.artifact_dir", lambda cmd: Path(tmp_art) / cmd):
+                args = argparse.Namespace(endpoint=self.harness.endpoint)
+                code = run.cmd_rec_mode(args)
+                self.assertEqual(code, 0)
+
+                art_file = Path(tmp_art) / "rec-mode" / "rec-mode.json"
+                self.assertTrue(art_file.exists())
+                data = json.loads(art_file.read_text(encoding="utf-8"))
+                self.assertTrue(data["start_rec_mode_supported"])
+                self.assertTrue(data["start_rec_mode_available"])
+                self.assertTrue(data["rpc_result"]["ok"])
+                self.assertEqual(data["camera_status_before"], "IDLE")
+                self.assertEqual(data["camera_status_after"], "IDLE")
+                self.assertIn("startRecMode", data["available_apis_after"])
+
 
 if __name__ == "__main__":
     unittest.main()

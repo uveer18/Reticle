@@ -156,6 +156,7 @@ def _seconds(shutter: str) -> float:
 AVAILABLE = [
     "getApplicationInfo", "getVersions", "getMethodTypes", "getAvailableApiList",
     "getEvent", "getShootMode", "setShootMode", "actTakePicture", "awaitTakePicture",
+    "startRecMode",
     "getShutterSpeed", "getAvailableShutterSpeed", "setShutterSpeed",
     "getIsoSpeedRate", "getAvailableIsoSpeedRate", "setIsoSpeedRate",
     "getFNumber", "getAvailableFNumber", "setFNumber",

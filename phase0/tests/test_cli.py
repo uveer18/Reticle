@@ -52,6 +52,9 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args_set.exposure_comp, 1)
         self.assertTrue(args_set.dry_run)
 
+        args_rec_mode = self.parser.parse_args(["rec-mode"])
+        self.assertEqual(args_rec_mode.command, "rec-mode")
+
 
 class CliExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -150,6 +153,87 @@ class CliExecutionTests(unittest.TestCase):
                     # Docs target must NOT have been written because it was simulated
                     written_paths = [str(call.args[0]) if call.args else "" for call in mock_write.mock_calls]
                     self.assertFalse(any("02-capability-matrix.md" in p for p in written_paths))
+
+    def test_cmd_rec_mode_success(self) -> None:
+        import json
+
+        client = support.CannedClient(
+            {
+                "getVersions": support.ok([["1.0"]]),
+                "getMethodTypes": support.method_types([["startRecMode", [], ["int"], "1.0"]]),
+                "getAvailableApiList": support.ok([["startRecMode"]]),
+                "getEvent": support.ok(
+                    [
+                        {"type": "cameraStatus", "cameraStatus": "IDLE"},
+                        {"type": "availableApiList", "names": ["startRecMode", "actTakePicture"]},
+                    ]
+                ),
+                "startRecMode": support.ok([0]),
+            }
+        )
+        with mock.patch("run._resolve_endpoint", return_value=support.ENDPOINT):
+            with mock.patch("run.SonyCamera", return_value=run.SonyCamera(support.ENDPOINT, client=client)):
+                args = argparse.Namespace(endpoint=support.ENDPOINT)
+                code = run.cmd_rec_mode(args)
+                self.assertEqual(code, 0)
+                self.assertEqual(client.calls.count("startRecMode"), 1)
+
+                artifact_path = Path(self.tmp.name) / "rec-mode" / "rec-mode.json"
+                self.assertTrue(artifact_path.exists())
+                data = json.loads(artifact_path.read_text(encoding="utf-8"))
+                self.assertTrue(data["rpc_result"]["ok"])
+                self.assertEqual(data["camera_status_before"], "IDLE")
+                self.assertEqual(data["camera_status_after"], "IDLE")
+                self.assertIn("actTakePicture", data["available_apis_after"])
+
+    def test_cmd_rec_mode_not_supported(self) -> None:
+        client = support.CannedClient(
+            {
+                "getVersions": support.ok([["1.0"]]),
+                "getMethodTypes": support.method_types([]),
+                "getAvailableApiList": support.ok([[]]),
+                "getEvent": support.ok([{"type": "cameraStatus", "cameraStatus": "IDLE"}]),
+            }
+        )
+        with mock.patch("run._resolve_endpoint", return_value=support.ENDPOINT):
+            with mock.patch("run.SonyCamera", return_value=run.SonyCamera(support.ENDPOINT, client=client)):
+                args = argparse.Namespace(endpoint=support.ENDPOINT)
+                code = run.cmd_rec_mode(args)
+                self.assertEqual(code, 3)
+                self.assertNotIn("startRecMode", client.calls)
+
+    def test_cmd_rec_mode_not_available(self) -> None:
+        client = support.CannedClient(
+            {
+                "getVersions": support.ok([["1.0"]]),
+                "getMethodTypes": support.method_types([["startRecMode", [], ["int"], "1.0"]]),
+                "getAvailableApiList": support.ok([[]]),
+                "getEvent": support.ok([{"type": "cameraStatus", "cameraStatus": "IDLE"}]),
+            }
+        )
+        with mock.patch("run._resolve_endpoint", return_value=support.ENDPOINT):
+            with mock.patch("run.SonyCamera", return_value=run.SonyCamera(support.ENDPOINT, client=client)):
+                args = argparse.Namespace(endpoint=support.ENDPOINT)
+                code = run.cmd_rec_mode(args)
+                self.assertEqual(code, 3)
+                self.assertNotIn("startRecMode", client.calls)
+
+    def test_cmd_rec_mode_rpc_failure(self) -> None:
+        client = support.CannedClient(
+            {
+                "getVersions": support.ok([["1.0"]]),
+                "getMethodTypes": support.method_types([["startRecMode", [], ["int"], "1.0"]]),
+                "getAvailableApiList": support.ok([["startRecMode"]]),
+                "getEvent": support.ok([{"type": "cameraStatus", "cameraStatus": "IDLE"}]),
+                "startRecMode": support.error(500, "Internal Error"),
+            }
+        )
+        with mock.patch("run._resolve_endpoint", return_value=support.ENDPOINT):
+            with mock.patch("run.SonyCamera", return_value=run.SonyCamera(support.ENDPOINT, client=client)):
+                args = argparse.Namespace(endpoint=support.ENDPOINT)
+                code = run.cmd_rec_mode(args)
+                self.assertEqual(code, 4)
+                self.assertEqual(client.calls.count("startRecMode"), 1)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ from .sony import ERR_STILL_CAPTURING, SonyCamera, shutter_seconds
 
 @dataclass
 class CaptureResult:
-    outcome: str = "unknown"  # complete | error | timeout | no_postview
+    outcome: str = "unknown"  # complete | no_postview | error | timeout | ambiguous
     requested_shutter: str | None = None
     status_before: str | None = None
     status_after: str | None = None
@@ -36,6 +36,15 @@ class CaptureResult:
     notes: list[str] = field(default_factory=list)
     timeline: list[dict[str, Any]] = field(default_factory=list)
     simulated: bool = False
+    ambiguous_reason: str | None = None
+
+    @property
+    def is_success(self) -> bool:
+        return self.outcome in {"complete", "no_postview", "success"}
+
+    @property
+    def is_ambiguous(self) -> bool:
+        return self.outcome == "ambiguous"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +60,7 @@ class CaptureResult:
             "notes": self.notes,
             "timeline": self.timeline,
             "simulated": self.simulated,
+            "ambiguous_reason": self.ambiguous_reason,
         }
 
 
@@ -72,7 +82,13 @@ def capture_once(
 
     before = stream.snapshot()
     result.status_before = (before.events.get("cameraStatus") or {}).get("cameraStatus")
-    result.timeline.append({"phase": "snapshot_before", "camera_status": result.status_before})
+    result.timeline.append(
+        {
+            "phase": "snapshot_before",
+            "camera_status": result.status_before,
+            "error_code": before.error_code,
+        }
+    )
 
     if set_shutter and shutter:
         applied = camera.set_shutter_speed(shutter)
@@ -80,8 +96,18 @@ def capture_once(
             {"phase": "set_shutter", "value": shutter, "ok": applied.ok, "error": applied.error}
         )
         if not applied.ok:
-            result.outcome = "error"
-            result.notes.append(f"setShutterSpeed rejected {shutter}: {applied.error}")
+            if applied.is_ambiguous:
+                result.outcome = "ambiguous"
+                result.ambiguous_reason = (
+                    f"setShutterSpeed transport ambiguity: {applied.transport_error}"
+                )
+                result.notes.append(
+                    "setShutterSpeed returned an ambiguous transport outcome; "
+                    "camera state is unknown and capture was aborted before actTakePicture."
+                )
+            else:
+                result.outcome = "error"
+                result.notes.append(f"setShutterSpeed rejected {shutter}: {applied.error}")
             return result
         # The API notes the setting may still be in flight on the server.
         time.sleep(0.35)
@@ -92,6 +118,44 @@ def capture_once(
             if shutter_seconds(actual) is not None:
                 expected_seconds = shutter_seconds(actual)
             result.timeline.append({"phase": "shutter_readback", "value": actual})
+        else:
+            result.timeline.append(
+                {
+                    "phase": "shutter_readback",
+                    "ok": False,
+                    "error": readback.error,
+                    "ambiguous": getattr(readback, "is_ambiguous", False),
+                }
+            )
+
+    # Fresh preflight status check immediately before actTakePicture.
+    preflight = stream.snapshot()
+    preflight_status = (preflight.events.get("cameraStatus") or {}).get("cameraStatus")
+    result.timeline.append(
+        {
+            "phase": "preflight_status",
+            "camera_status": preflight_status,
+            "error_code": preflight.error_code,
+        }
+    )
+    if preflight_status != "IDLE":
+        result.outcome = "error"
+        if preflight_status is None:
+            result.notes.append(
+                "Preflight aborted: cameraStatus missing/unknown; refusing actTakePicture."
+            )
+        else:
+            result.notes.append(
+                f"Preflight aborted: cameraStatus is {preflight_status!r}, expected 'IDLE'."
+            )
+        result.status_after = preflight_status
+        recorder.event(
+            "note",
+            message="capture aborted at preflight",
+            outcome=result.outcome,
+            camera_status=preflight_status,
+        )
+        return result
 
     if budget_seconds is None:
         budget_seconds = max(90.0, (expected_seconds or 0.0) * 2 + 60.0)
@@ -106,12 +170,21 @@ def capture_once(
             "latency_ms": round(act.latency_ms, 1),
             "ok": act.ok,
             "error": act.error,
+            "ambiguous": act.is_ambiguous,
+            "transport_error": act.transport_error,
         }
     )
 
     if act.ok:
         result.postview_urls = camera.postview_urls(act)
         result.outcome = "complete" if result.postview_urls else "no_postview"
+    elif act.is_ambiguous:
+        result.outcome = "ambiguous"
+        result.ambiguous_reason = f"actTakePicture transport ambiguity: {act.transport_error}"
+        result.notes.append(
+            "actTakePicture returned an ambiguous transport outcome; "
+            "camera state is unknown and actTakePicture must not be retried automatically."
+        )
     elif act.error_code == ERR_STILL_CAPTURING:
         result.notes.append("40403 on actTakePicture: exposure still running (expected for long shutter)")
 
@@ -126,11 +199,23 @@ def capture_once(
                     "latency_ms": round(awaited.latency_ms, 1),
                     "ok": awaited.ok,
                     "error": awaited.error,
+                    "ambiguous": awaited.is_ambiguous,
+                    "transport_error": awaited.transport_error,
                 }
             )
             if awaited.ok:
                 result.postview_urls = camera.postview_urls(awaited)
                 result.outcome = "complete" if result.postview_urls else "no_postview"
+                break
+            if awaited.is_ambiguous:
+                result.outcome = "ambiguous"
+                result.ambiguous_reason = (
+                    f"awaitTakePicture transport ambiguity: {awaited.transport_error}"
+                )
+                result.notes.append(
+                    "awaitTakePicture returned an ambiguous transport outcome; "
+                    "capture may have completed on camera. Do not retry actTakePicture automatically."
+                )
                 break
             if awaited.error_code != ERR_STILL_CAPTURING:
                 result.outcome = "error"

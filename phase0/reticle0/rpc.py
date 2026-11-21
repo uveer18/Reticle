@@ -56,6 +56,16 @@ class RpcResult:
         return not self.ok
 
     @property
+    def is_ambiguous(self) -> bool:
+        """True when the client cannot know whether the camera executed the request.
+
+        Transport timeouts, connection losses, and unparseable responses are
+        treated as ambiguous because the request may have reached the camera.
+        Callers must reconcile camera state before retrying any mutating action.
+        """
+        return self.transport_error is not None
+
+    @property
     def error_message(self) -> str | None:
         err = self.error
         return err[1] if err else self.transport_error

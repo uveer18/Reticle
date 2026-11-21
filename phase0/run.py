@@ -9,10 +9,11 @@ Subcommands map to the investigation phases:
     events     Phase E - event stream behaviour and camera status transitions
     capture    Phase D - one still, timed, including the 40403 long-exposure path
     set        apply exactly one exposure setting, with read-back
+    rec-mode   explicitly issue startRecMode to prepare shooting mode
     sim        run the offline test double
 
-Defaults are conservative: nothing writes to the camera except `set` and
-`capture`, and live view is never started by any command.
+Defaults are conservative: nothing writes to the camera except `set`,
+`rec-mode` and `capture`, and live view is never started by any command.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -431,6 +432,103 @@ def _read_back(result: object) -> object:
     return value
 
 
+# -------------------------------------------------------------------- rec-mode
+
+def cmd_rec_mode(args: argparse.Namespace) -> int:
+    print(BANNER)
+    out = artifact_dir("rec-mode")
+    recorder = Recorder(out / "trace.jsonl")
+
+    camera = _camera_for(args, recorder)
+    if camera is None:
+        return 2
+
+    camera.load_capabilities()
+    stream = EventStream(camera, recorder=recorder)
+
+    rule("Pre-check: startRecMode capability and status")
+    snapshot_before = stream.snapshot()
+    status_before = (snapshot_before.events.get("cameraStatus") or {}).get("cameraStatus")
+    print(f"camera status before : {status_before}")
+
+    is_supported = camera.capabilities.supports("startRecMode")
+    is_available = camera.capabilities.is_available("startRecMode")
+    print(f"startRecMode supported: {is_supported}")
+    print(f"startRecMode available: {is_available}")
+
+    if not is_supported or not is_available:
+        if not is_supported:
+            print("\nstartRecMode is not supported by camera firmware.")
+        else:
+            print("\nstartRecMode is currently not available in this camera state.")
+        artifact_data = {
+            "command": "rec-mode",
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "endpoint": camera.endpoint,
+            "simulated": camera.is_simulated,
+            "camera_status_before": status_before,
+            "start_rec_mode_supported": is_supported,
+            "start_rec_mode_available": is_available,
+            "rpc_result": None,
+            "camera_status_after": None,
+            "available_apis_after": None,
+            "event_snapshot_before": snapshot_before.events,
+            "event_snapshot_after": None,
+            "aborted_reason": "not supported" if not is_supported else "not available",
+        }
+        (out / "rec-mode.json").write_text(json.dumps(artifact_data, indent=2), encoding="utf-8")
+        print(f"\nartifact: {out / 'rec-mode.json'}")
+        print(f"trace   : {out / 'trace.jsonl'}")
+        return 3
+
+    rule("Execute startRecMode (single attempt, no retry)")
+    res = camera.start_rec_mode()
+    print(f"startRecMode -> {'ok' if res.ok else 'error'} (latency {res.latency_ms:.1f} ms)")
+    if res.error:
+        print(f"error code: {res.error[0]}, message: {res.error[1]}")
+    elif res.transport_error:
+        print(f"transport error: {res.transport_error}")
+
+    snapshot_after = None
+    status_after = None
+    available_api_list = None
+    if res.ok:
+        rule("Post-check: event snapshot (polling=false)")
+        snapshot_after = stream.snapshot()
+        status_after = (snapshot_after.events.get("cameraStatus") or {}).get("cameraStatus")
+        available_api_list = (snapshot_after.events.get("availableApiList") or {}).get("names", [])
+        print(f"camera status after  : {status_after}")
+        print(f"available APIs ({len(available_api_list)}): {available_api_list}")
+
+    artifact_data = {
+        "command": "rec-mode",
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "endpoint": camera.endpoint,
+        "simulated": camera.is_simulated,
+        "camera_status_before": status_before,
+        "start_rec_mode_supported": is_supported,
+        "start_rec_mode_available": is_available,
+        "rpc_result": {
+            "ok": res.ok,
+            "http_status": res.http_status,
+            "latency_ms": round(res.latency_ms, 1),
+            "result": res.result,
+            "error": res.error,
+            "transport_error": res.transport_error,
+        },
+        "camera_status_after": status_after,
+        "available_apis_after": available_api_list,
+        "event_snapshot_before": snapshot_before.events,
+        "event_snapshot_after": snapshot_after.events if snapshot_after else None,
+    }
+    artifact_path = out / "rec-mode.json"
+    artifact_path.write_text(json.dumps(artifact_data, indent=2), encoding="utf-8")
+
+    print(f"\nartifact: {artifact_path}")
+    print(f"trace   : {out / 'trace.jsonl'}")
+    return 0 if res.ok else 4
+
+
 # ------------------------------------------------------------------------ sim
 
 def cmd_sim(args: argparse.Namespace) -> int:
@@ -480,6 +578,9 @@ def build_parser() -> argparse.ArgumentParser:
     setting.add_argument("--exposure-comp", type=int, help="exposure compensation step index (e.g. 0, 1, -2)")
     setting.add_argument("--dry-run", action="store_true")
     setting.set_defaults(func=cmd_set)
+
+    rec_mode = sub.add_parser("rec-mode", parents=[common], help="explicitly issue startRecMode")
+    rec_mode.set_defaults(func=cmd_rec_mode)
 
     sim = sub.add_parser("sim", help="run the offline simulated camera")
     sim.add_argument("--port", type=int, default=10000)
